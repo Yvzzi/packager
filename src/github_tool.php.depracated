@@ -1,0 +1,141 @@
+<?php
+require_once __DIR__ . "/../autoload@module.php";
+try_require_once(inner() . "/lib/autoload@lib.php");
+try_require_once(module() . "/lib/autoload@lib.php");
+
+use curl\Curl;
+use cli\Cli;
+use common\util\FileIO;
+
+const USAGE = <<<EOF
+Usage:
+--create-remote <repos>             Create a repository of remote
+--delete-remote <user>  <repos>     Delete a repository of remote
+--list          <name>              List repository of <name>
+--list-org      <name>              List repository of <name>
+--set-token     <token>             Token of github
+EOF;
+
+function findGit($path) {
+    $dirs = scandir($path);
+    if (in_array(".git", $dirs))
+        return $path;
+    if (FileIO::isRootPath($path)) return null;
+    return findGit($path . "/..");
+}
+
+function findConfig() {
+    $path = module();
+    if (!file_exists($path . "/packager.json"))
+        file_put_contents($path . "/packager.json", "{}");
+    $obj = json_decode(file_get_contents($path . "/packager.json"), true);
+    return $obj["github_token"] = $obj["github_token"] ?? null;
+}
+
+function setConfig($token) {
+    $path = module();
+    if (!file_exists($path . "/packager.json"))
+        file_put_contents($path . "/packager.json", "{}");
+    $obj = json_decode(file_get_contents($path . "/packager.json"), true);
+    $obj["github_token"] = $token;
+    file_put_contents($path . "/packager.json", json_encode($obj, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+    $str = "";
+    if (file_exists($path . "/.gitignore")) {
+        $str = file_get_contents($path . "/.gitignore");
+    }
+    $str .= "\npackager.json";
+    file_get_contents($path . "/.gitignore", $str);
+}
+
+$option = Cli::getCliOption($argv, [
+    "create-remote",
+    "delete-remote",
+    "list",
+    "list-org",
+    "set-token"
+]);
+
+if ($option->option("create-remote") && $option->position(1)) {
+    if (!($token = findConfig())) {
+        Cli::tell("Config dosen't be set");
+        exit;
+    }
+    $curl = new Curl();
+    $curl->ignoreSSL();
+    $curl->useJson();
+    $curl->userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/81.0.4044.122 Safari/537.36";
+    $curl->headers["Authorization"] = "token $token";
+
+    $response = $curl->post("https://api.github.com/user/repos", [
+        "name" => $option->position(1)
+    ]);
+    if ($response !== false) {
+        Cli::tell("Success to create");
+    } else {
+        Cli::tell("Fail to create");
+    }
+} elseif ($option->option("list") && $option->position(1)) {
+    if (!($token = findConfig())) {
+        Cli::tell("Config dosen't be set");
+        exit;
+    }
+    $curl = new Curl();
+    $curl->ignoreSSL();
+    $curl->userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/81.0.4044.122 Safari/537.36";
+    $curl->headers["Authorization"] = "token $token";
+
+    $response = $curl->get("https://api.github.com/users/" . $option->position(1) .  "/repos?type=all");
+    if ($response !== false) {
+        $list = json_decode($response->body, true);
+        $str = array_reduce($list, function ($carry, $now) {
+            $carry .= $now["full_name"] . "\n";
+            return $carry;
+        }, "");
+        Cli::tell($str);
+    } else {
+        Cli::tell("Fail to get list");
+    }
+} elseif ($option->option("list-org") && $option->position(1)) {
+    if (!($token = findConfig())) {
+        Cli::tell("Config dosen't be set");
+        exit;
+    }
+    $curl = new Curl();
+    $curl->ignoreSSL();
+    $curl->userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/81.0.4044.122 Safari/537.36";
+    $curl->headers["Authorization"] = "token $token";
+
+    $response = $curl->get("https://api.github.com/orgs/" . $option->position(1) .  "/repos?type=all");
+    if ($response !== false) {
+        $list = json_decode($response->body, true);
+        $str = array_reduce($list, function ($carry, $now) {
+            $carry .= $now["full_name"] . "\n";
+            return $carry;
+        }, "");
+        Cli::tell($str);
+    } else {
+        Cli::tell("Fail to get list");
+    }
+} elseif ($option->option("delete-remote")) {
+    if (!($token = findConfig())) {
+        Cli::tell("Config dosen't be set");
+        exit;
+    }
+    $curl = new Curl();
+    $curl->ignoreSSL();
+    $curl->userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/81.0.4044.122 Safari/537.36";
+    $curl->headers["Authorization"] = "token $token";
+
+    Cli::whetherOrExit("Do you want to delete " . $option->position(1) . "/" . $option->position(2) . " ?");
+
+    $response = $curl->delete("https://api.github.com/repos/" . $option->position(1) . "/" . $option->position(2));
+    if ($response !== false) {
+        Cli::tell("Success to delete");
+    } else {
+        Cli::tell("Fail to delete");
+    }
+} elseif ($option->option("set-token") && $option->position(1)) {
+    setConfig($option->position(1));
+} else {
+    Cli::tell(USAGE);
+}

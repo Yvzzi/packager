@@ -1,0 +1,207 @@
+<?php
+/**
+ *  @file packagerJavaCli.php
+ *  @brief Easy comsoper of java
+ *  @author Yvzzi
+ */
+
+require_once __DIR__ . "/../autoload@module.php";
+try_require_once(inner() . "/lib/autoload@lib.php");
+try_require_once(module() . "/lib/autoload@lib.php");
+
+use json5\JSON5;
+use common\util\FileIO;
+use cli\Cli;
+
+$USAGE = <<<EOF
+Usage: php packager_java_cli.php <action> [<option> <args>]
+    -p <path>   Specific path of java project, default is current path
+    -o <path>   Specific path of jar, default is current path
+    -d <path>   Clean compiled class files
+    -a          Try to find Main Class automatically
+    -i          Ignore Main Class, just treat the jar as a libraay.
+    -c          Generate a default config with help
+    -h          Show help
+
+EOF;
+
+$manifest = <<<EOF
+Manifest-Version: 1.0
+Created-By: Packager
+Main-Class: {{MainPath}}
+Class-Path: {{LibPath}}
+
+EOF;
+
+function assertParams($expr) {
+    if ($expr) return;
+    Cli::tell(USAGE);
+    exit(0);
+}
+
+function scan(string $path, array &$arr, $relative = "."){
+    $dh = opendir($path);
+    while (($file = readdir($dh)) !== false){
+        if ($file == '.' || $file == '..' || $file == ".git")
+            continue;
+        if (is_dir($path . '/' . $file)){
+            scan($path . '/' . $file, $arr, $relative . "/" . $file);
+        } else {
+            array_push($arr, $relative . "/" . $file);
+        }
+    }
+}
+
+function delDir($dir) {
+   $dh = opendir($dir);
+   while ($file = readdir($dh)) {
+      if ($file != "." && $file != "..") {
+         $fullpath = $dir . "/" . $file;
+         if (!is_dir($fullpath)) {
+            unlink($fullpath);
+         } else {
+            delDir($fullpath);
+         }
+      }
+   }
+   closedir($dh);
+   if (rmdir($dir)) {
+      return true;
+   } else {
+      return false;
+   }
+}
+
+$option = Cli::getCliOption($argv, ["p:", "c", "o", "h", "a", "i", "d:", "t:"]);
+
+if ($option->option("h")) {
+    Cli::tell($USAGE);
+} elseif ($option->option("c")) {
+    file_put_contents("manifest.default.json5", JSON5::stringify([
+        "\$comment_note" => "Please rename this file to manifest.json5 after editing",
+        "\$comment_mode" => "Index is the namespace of main-class, you should change 'com.example.helloworld' to namespace of your main class",
+        "main" => "com.example.helloworld"
+    ]));
+} elseif ($option->option("d")) {
+    $file = FileIO::getAbsolutePath($option->option("d"));
+    if (file_exists($file . "/bin"))
+        delDir($file . "/bin");
+    Cli::tell("=> Done.");
+} elseif ($option->option("p")) {
+    $currentPath = FileIO::getAbsolutePath($option->option("p"));
+
+    $javaFiles = [];
+    scan("$currentPath/src/main/java", $javaFiles);
+    $resources = [];
+    if (file_exists("$currentPath/src/main/resources"))
+        scan("$currentPath/src/main/resources", $resources);
+
+    $cache = "$currentPath/bin/.cache";
+    if (file_exists($cache)) {
+        $cache = json_decode(file_get_contents($cache), true);
+    } else {
+        $cache = [];
+    }
+
+    $str = "";
+    foreach ($javaFiles as $f) {
+        $time = filectime("{$currentPath}/src/main/java/{$f}");
+        if (isset($cache[$f])) {
+            if ($time !== false && $cache[$f] === $time)
+                continue;
+        } else {
+            $cache[$f] = $time;
+            $str .= "{$currentPath}/src/main/java/{$f}\n";
+        }
+    }
+    $str = trim($str);
+
+    if (!file_exists("$currentPath/bin"))
+        mkdir("$currentPath/bin", 0755);
+    file_put_contents("$currentPath/bin/.cache", json_encode($cache));
+
+    if (!empty($str)) {
+        $tmplist = tempnam(sys_get_temp_dir(), "TMP");
+        file_put_contents($tmplist, $str);
+
+        exec("javac -encoding utf-8 -d ${currentPath}/bin -cp ${currentPath}/../lib/* @${tmplist}");
+
+        unlink($tmplist);
+    }
+
+    foreach ($resources as $f) {
+        copy("$currentPath/src/main/resources/$f", "$currentPath/bin/$f");
+    }
+
+    if (!$option->option("i")) {
+        if (file_exists($currentPath . "/manifest.json")) {
+            $obj = file_get_contents($currentPath . "/manifest.json");
+            $obj = json_decode($obj, true);
+        } elseif (file_exists($currentPath . "/manifest.json5")) {
+            $obj = file_get_contents($currentPath . "/manifest.json5");
+            $obj = JSON5::parse($obj);
+        } else {
+            Cli::tell("=> Manifest.json(5) not found in {$currentPath}");
+            if (!$option->option("a")) {
+                exit;
+            }
+            Cli::tell("=> Try to find main class automatically");
+            $found = null;
+            $foundKey = [];
+            foreach ($javaFiles as $key => $java) {
+                if (strpos(strtolower($java), "main") !== false) {
+                    $foundKey[$key] = true;
+                    $contents = file_get_contents("{$currentPath}/src/main/java/$java");
+                    if (preg_match("/static\\s+void\\s+main/", $contents)) {
+                        $found = $java;
+                        break;
+                    }
+                }
+            }
+            if (is_null($found)) {
+                foreach ($javaFiles as $key => $java) {
+                    if (isset($foundKey[$key]))
+                        continue;
+                    $contents = file_get_contents("{$currentPath}/src/main/java/$java");
+                    if (preg_match("/static\\s+void\\s+main/", $contents)) {
+                        $found = $java;
+                        break;
+                    }
+                }
+            }
+            if (is_null($found)) {
+                Cli::tell("=> Fail to found main class automatically. Abort.");
+                exit;
+            }
+            $found = trim($found, "./");
+            $found = substr($found, 0, strlen($found) - 5);
+            $found = str_replace("/", ".", $found);
+            $obj = [
+                "main" => $found
+            ];
+        }
+    } else {
+        $obj = [
+            "main" => null
+        ];
+    }
+
+    $output = $option->option("o", FileIO::getAbsolutePath($currentPath) . ".jar");
+
+    $manifest = str_replace("{{LibPath}}", "lib/*", $manifest);
+    if (!is_null($obj["main"]))
+        $manifest = str_replace("{{MainPath}}", $obj["main"], $manifest);
+    $tmpManifest = tempnam(sys_get_temp_dir(), "TMP");
+    file_put_contents($tmpManifest, $manifest);
+
+    $path = getcwd();
+    chdir("$currentPath/bin");
+    exec("jar --create --verbose --file=${output} --manifest={$tmpManifest} .");
+    chdir($path);
+
+    unlink($tmpManifest);
+
+    Cli::tell("=> Done.");
+} else {
+    Cli::tell($USAGE);
+}

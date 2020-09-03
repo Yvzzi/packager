@@ -1,0 +1,232 @@
+<?php
+
+require_once __DIR__ . "/../autoload@module.php";
+try_require_once(inner() . "/lib/autoload@lib.php");
+try_require_once(module() . "/lib/autoload@lib.php");
+use cli\Cli;
+use common\util\FileIO;
+
+const USAGE = <<<EOF
+Basic Usage:
+-a[name], --autoload=[name]                     Create autoload file of current directory with
+                                                autoload@<name>.php or autoload.php
+-r, --replace                                   Update and replace the old autoload file of current directory
+-n, --new    module, bare  <name>:<namespace>   Create module(library)/bare project template
+
+Following is used for composer project:
+-f, --fix                                       Fix autoload of composer
+--repos-config <type>  <template>               Add a template of vcs that is used to generate url of <user/repos>
+                                                e.g. https//github.com/{{user}}/{{repos}} is a template for github
+--repos-add <type>  <user/repos>                Add <user/repos> to this composer project from vcs
+--repos-del <type>  <user/repos>                Del <user/repos> to this composer project from vcs
+-h, --help                                      Get help
+EOF;
+
+$autoloadFile = __DIR__ . "/../autoload@module.php";
+
+function findComposer($path) {
+    $dirs = scandir($path);
+    if (in_array("composer.json", $dirs))
+        return $path;
+    if (FileIO::isRootPath($path)) return null;
+    return findGit($path . "/..");
+}
+
+function reposeConfig($type, $template) {
+    $path = module();
+    if (!file_exists($path . "/packager.json"))
+        file_put_contents($path . "/packager.json", '{"repositories":[]}');
+    $obj = json_decode(file_get_contents($path . "/packager.json"), true);
+    $obj["repositories"] = $obj["repositories"] ?? [];
+    $obj["repositories"][$type] = $template;
+    file_put_contents($path . "/packager.json", json_encode($obj, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+}
+
+function reposAdd($type, $target) {
+    $path = module();
+    if (!file_exists($path . "/packager.json")) {
+        Cli::tell("The config dosen't be set");
+        exit;
+    }
+    $obj = json_decode(file_get_contents($path . "/packager.json"), true);
+    if (!isset($obj["repositories"]) || !isset($obj["repositories"][$type])) {
+        Cli::tell("Cannot find template");
+        exit;
+    }
+    [$user, $repos] = explode("/", $target);
+    $target = str_replace("{{repos}}", $repos, $obj[$type]);
+    $target = str_replace("{{user}}", $user, $target);
+
+    $obj = json_decode(file_get_contents($path . "/composer.json"));
+    if (!isset($obj->{"repositories"}))
+        $obj->{"repositories"} = [];
+    $obj->{"repositories"} = array_filter($obj->{"repositories"}, function ($item) use ($target) {
+        return $item->{"type"} !== "vcs" || $item->{"url"} !== "https://github.com/$target";
+    });
+    array_push($obj->{"repositories"}, [
+        "type" => "vcs",
+        "url" => $target
+    ]);
+    file_put_contents($path . "/composer.json", json_encode($obj, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+    Cli::tell("Success to add $target");
+}
+
+function reposDel($type, $target) {
+    $path = module();
+    if (!file_exists($path . "/packager.json")) {
+        Cli::tell("The config dosen't be set");
+        exit;
+    }
+    $obj = json_decode(file_get_contents($path . "/packager.json"), true);
+    if (!isset($obj["repositories"]) || !isset($obj["repositories"][$type])) {
+        Cli::tell("Cannot find template");
+        exit;
+    }
+    [$user, $repos] = explode("/", $target);
+    $target = str_replace("{{repos}}", $repos, $obj[$type]);
+    $target = str_replace("{{user}}", $user, $target);
+
+    $obj = json_decode(file_get_contents($path . "/composer.json"));
+    if (!isset($obj->{"repositories"}))
+        $obj->{"repositories"} = [];
+    $obj->{"repositories"} = array_filter($obj->{"repositories"}, function ($item) use ($target) {
+        return $item->{"type"} !== "vcs" || $item->{"url"} !== $target;
+    });
+    file_put_contents($path . "/composer.json", json_encode($obj, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+    Cli::tell("Success to del $target");
+}
+
+function fix() {
+    $composer = findComposer(getcwd());
+    if ($composer !== null) {
+        Cli::whetherOrExit("Use $composer/composer.json to continue?");
+        $obj = json_decode(file_get_contents($composer . "/composer.json"));
+        if (!isset($obj->{"autoload"}))
+            $obj->{"autoload"} = new \stdClass;
+        if (!isset($obj->{"autoload"}->{"files"}))
+            $obj->{"autoload"}->{"files"} = [];
+        if (file_exists($composer . "/autoload@module.php")) {
+            if (in_array("autoload@module.php", $obj->{"autoload"}->{"files"}))
+                return;
+            array_push($obj->{"autoload"}->{"files"}, "autoload@module.php");
+            file_put_contents($composer . "/composer.json", json_encode($obj, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+            Cli::tell("Success to add autoload@module");
+        } elseif (file_exists($composer . "/autoload@bare.php")) {
+            if (in_array("autoload@bare.php", $obj->{"autoload"}->{"files"}))
+                return;
+            array_push($obj->{"autoload"}->{"files"}, "autoload@bare.php");
+            file_put_contents($composer . "/composer.json", json_encode($obj, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+            Cli::tell("Success to add autoload@bare");
+        } else {
+            Cli::tell("Cannot find autoload@module or autoload@bare in this project");
+        }
+    } else {
+        Cli::tell("Cannot find composer.json");
+    }
+}
+
+function create($type, $name) {
+    $ret = explode(":", $name);
+    if (count($ret) === 2)
+        [$name, $namespace] = $ret;
+    else $namespace = "";
+    $namespace = str_replace("\\", "/", $namespace);
+    if ($type === "module") {
+        if (!file_exists(getcwd() . "/$name/src/$namespace"))
+            mkdir(getcwd() . "/$name/src/$namespace", 0755, true);
+        generateAutoload("@module", getcwd() . "/$name");
+        Cli::tell("Success to create module");
+    } elseif ($type === "project") {
+        if (!file_exists(getcwd() . "/$name/$namespace"))
+            mkdir(getcwd() . "/$name/$namespace", 0755, true);
+        generateAutoload("@bare", getcwd() . "/$name");
+        Cli::tell("Success to create bare project");
+    }
+}
+
+function generateAutoload($name, $path = null) {
+    global $autoloadFile;
+    $path = $path === null ? getcwd() : $path;
+    $path = $path . "/autoload{$name}.php";
+    $content = file_get_contents($autoloadFile);
+    file_put_contents($path, $content);
+}
+
+function updateAutoload($directory) {
+    global $autoloadFile;
+    $path = $directory . "/autoload.php";
+    if (file_exists($path)) {
+        Cli::tell("Update {$path}");
+        $content = file_get_contents($autoloadFile);
+        file_put_contents($path, $content);
+        return;
+    }
+
+    $path = $directory . "/autoload@bare.php";
+    if (file_exists($path)) {
+        Cli::tell("Update {$path}");
+        $content = file_get_contents($autoloadFile);
+        file_put_contents($path, $content);
+        return;
+    }
+
+    $path = $directory . "/autoload@module.php";
+    if (file_exists($path)) {
+        Cli::tell("Update {$path}");
+        $content = file_get_contents($autoloadFile);
+        file_put_contents($path, $content);
+        return;
+    }
+
+    $path = $directory . "/autoload@lib.php";
+    if (file_exists($path)) {
+        Cli::tell("Update {$path}");
+        $content = file_get_contents($autoloadFile);
+        file_put_contents($path, $content);
+        $dirs = scandir($directory);
+        foreach ($dirs as $dir) {
+            if ($dir === ".." || $dir === ".") continue;
+            $path = $directory . "/" . $dir;
+            updateAutoload($path);
+        }
+    }
+}
+
+$option = Cli::getCliOption($argv, [
+    "a?", "autoload?",
+    "r", "replace",
+    "n", "new",
+    "f", "fix",
+    "repos-add", "repos-del", "repos-config"
+]);
+
+if ($option->option("a") !== false) {
+    $name = $option->option("a") !== ""
+        ? "@" . $option->option("a")
+        : ($option->option("autoload") !== "" ? "@" . $option->option("autoload") : "");
+    generateAutoload($name);
+} elseif ($option->option("r") || $option->option("replace")) {
+    updateAutoload(getcwd());
+} elseif (($option->option("n") || $option->option("new")) && $option->position(1) && $option->position(2)) {
+    $type = $option->position(1);
+    $name = $option->position(2);
+    create($type, $name);
+} elseif ($option->option("f") || $option->option("fix")) {
+    fix();
+} elseif ($option->option("repos-add") && $option->position(1) && $option->position(2)) {
+    reposAdd($option->position(1), $option->position(2));
+} elseif ($option->option("repos-del") && $option->position(1) && $option->position(2)) {
+    reposDel($option->position(1), $option->position(2));
+} elseif ($option->option("repos-config") && $option->position(1) && $option->position(2)) {
+    if (strpos($option->position(2), "{{user}}") === false) {
+        Cli::tell("Not found {{user}}");
+        exit;
+    }
+    if (strpos($option->position(2), "{{repos}}") === false) {
+        Cli::tell("Not found {{repos}}");
+        exit;
+    }
+    reposeConfig($option->position(1), $option->position(2));
+} else {
+    Cli::tell(USAGE);
+}

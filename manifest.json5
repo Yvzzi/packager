@@ -1,0 +1,15 @@
+{
+    // File list here will be ignore and it will not be packed into phar
+    ignore: [
+        "build"
+    ],
+    /**
+     * There are 2 kinds of modes: default, none
+     * If use mode 'default'. When you require it, it will load 'autoload@module.php' ('index.cli') when you use the phar.
+     * When you access it by web browser, it will load 'src/index.php' ('index.web') when you use the phar.
+     * If use mode 'none', you should write 'index.web', 'index.cli' by yourselft
+     */
+    main.mode: "none",
+    main.web: "src/packager_lite.php",
+    main.cli: "src/packager_lite.php"
+}
